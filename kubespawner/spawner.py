@@ -44,15 +44,6 @@ class PodReflector(NamespacedResourceReflector):
     def pods(self):
         return self.resources
 
-class EventReflector(NamespacedResourceReflector):
-    kind = 'events'
-
-    list_method_name = 'list_namespaced_event'
-
-    @property
-    def events(self):
-        return self.resources
-
 class KubeSpawner(Spawner):
     """
     Implement a JupyterHub spawner to spawn pods in a Kubernetes Cluster.
@@ -803,12 +794,35 @@ class KubeSpawner(Spawner):
 
     profile_form_template = Unicode(
         """
-        <label for="profile">Please select a profile to launch</label>
-        <select class="form-control" name="profile" required autofocus>
-            {% for profile in profile_list %}
-            <option {% if profile.default %}selected{% endif %} value="{{ loop.index0 }}">{{ profile.display_name }}</option>
-            {% endfor %}
-        </select>
+        <script>
+        // JupyterHub 0.8 applied form-control indisciminately to all form elements.
+        // Can be removed once we stop supporting JupyterHub 0.8
+        $(document).ready(function() {
+            $('#kubespawner-profiles-list input[type="radio"]').removeClass('form-control');
+        });
+        </script>
+        <style>
+        /* The profile description should not be bold, even though it is inside the <label> tag */
+        #kubespawner-profiles-list label p {
+            font-weight: normal;
+        }
+        </style>
+
+        <div class='form-group' id='kubespawner-profiles-list'>
+        {% for profile in profile_list %}
+        <label for='profile-item-{{ loop.index0 }}' class='form-control input-group'>
+            <div class='col-md-1'>
+                <input type='radio' name='profile' id='profile-item-{{ loop.index0 }}' value='{{ loop.index0 }}' {% if profile.default %}checked{% endif %} />
+            </div>
+            <div class='col-md-11'>
+                <strong>{{ profile.display_name }}</strong>
+                {% if profile.description %}
+                <p>{{ profile.description }}</p>
+                {% endif %}
+            </div>
+        </label>
+        {% endfor %}
+        </div>
         """,
         config=True,
         help="""
@@ -833,6 +847,7 @@ class KubeSpawner(Spawner):
 
         Signature is: List(Dict()), where each item is a dictionary that has two keys:
         - 'display_name': the human readable display name (should be HTML safe)
+        - 'description': Optional description of this profile displayed to the user.
         - 'kubespawner_override': a dictionary with overrides to apply to the KubeSpawner
             settings. Each value can be either the final value to change or a callable that
             take the `KubeSpawner` instance as parameter and return the final value.
@@ -1078,6 +1093,8 @@ class KubeSpawner(Spawner):
             yield self.pod_reflector.first_load_future
         data = self.pod_reflector.pods.get(self.pod_name, None)
         if data is not None:
+            if data.status.phase == 'Pending':
+                return None
             for c in data.status.container_statuses:
                 # return exit code if notebook container has terminated
                 if c.name == 'notebook':
@@ -1112,17 +1129,6 @@ class KubeSpawner(Spawner):
                 else:
                     raise
 
-        main_loop = IOLoop.current()
-        def on_reflector_failure():
-            self.log.critical("Events reflector failed, halting Hub.")
-            main_loop.stop()
-
-        # events are selected based on pod name, which will include previous launch/stop
-        self.events = EventReflector(
-                parent=self, namespace=self.namespace,
-                fields={'involvedObject.kind': 'Pod', 'involvedObject.name': self.pod_name},
-                on_failure=on_reflector_failure
-            )
         # If we run into a 409 Conflict error, it means a pod with the
         # same name already exists. We stop it, wait for it to stop, and
         # try again. We try 4 times, and if it still fails we give up.
@@ -1162,10 +1168,6 @@ class KubeSpawner(Spawner):
         )
 
         pod = self.pod_reflector.pods[self.pod_name]
-        self.log.debug('pod %s events before launch: %s', self.pod_name, self.events.events)
-        # Note: we stop the event watcher once launch is successful, but the reflector
-        # will only stop when the next event comes in, likely when it is stopped.
-        self.events.stop()
         return (pod.status.pod_ip, self.port)
 
     @gen.coroutine
